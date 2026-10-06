@@ -1,10 +1,34 @@
 
 from unittest.mock import patch
+import json
+from typing import Final
 
+import httpx
 import pytest
 
 from litellm.types.utils import Embedding
 from litellm.main import bedrock_embedding, embedding, EmbeddingResponse, Usage
+from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+
+@pytest.mark.parametrize("encoding_format,embedding_type", (("float", "float"), ("base64", "binary")))
+def test_titan_v2_embedding_filters_cache_controls(encoding_format: str, embedding_type: str) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"inputText": "hi", "dimensions": 256, "embeddingTypes": [embedding_type]}
+        return httpx.Response(200, json={"embedding": [0.1, 0.2], "inputTextTokenCount": 1})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        result: Final = embedding(
+            model="bedrock/amazon.titan-embed-text-v2:0",
+            input=["hi"],
+            dimensions=256,
+            encoding_format=encoding_format,
+            cache_control_injection_points=[{"location": "message", "index": -1}],
+            client=HTTPHandler(client=transport),
+            api_key="synthetic-bearer",
+            aws_region_name="us-east-1",
+        )
+    assert result.data[0]["embedding"] == [0.1, 0.2]
 
 
 _mock_model_id = (

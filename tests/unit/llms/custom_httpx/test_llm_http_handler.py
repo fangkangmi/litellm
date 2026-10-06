@@ -4925,3 +4925,227 @@ async def test_lookup_handlers_raise_the_provider_error_status(name: str, is_asy
 
     assert error.value.status_code == status_code
     assert "No such object" in error.value.message
+
+
+def _parameter_filter_logging() -> litellm.Logging:
+    from datetime import datetime
+
+    return litellm.Logging(
+        model="claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        call_type="completion",
+        start_time=datetime(2026, 1, 1),
+        litellm_call_id="parameter-filter",
+        function_id="parameter-filter",
+    )
+
+
+@pytest.mark.parametrize("is_async", (False, True))
+@pytest.mark.parametrize("route", ("invoke", "converse"))
+@pytest.mark.parametrize("overrides", (False, True))
+async def test_chat_filters_reserved_overrides_and_preserves_tool_cache(is_async: bool, route: str, overrides: bool) -> None:
+    from litellm.litellm_core_utils.internal_params import INTERNAL_REQUEST_PARAMS
+
+    model: Final = "anthropic.claude-sonnet-4-6"
+    schema: Final = {"type": "object", "properties": {"fake_stream": {"type": "boolean"}}}
+    tool: Final = {"type": "function", "function": {"name": "inspect", "parameters": schema}}
+    expected: Final = (
+        {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "max_tokens": 10,
+            "anthropic_version": "bedrock-2023-05-31",
+            "tools": [{"name": "inspect", "input_schema": schema}],
+            "extension": {"fake_stream": "user data"},
+        }
+        if route == "invoke"
+        else {
+            "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+            "inferenceConfig": {"maxTokens": 12 if overrides else 10},
+            **({"additionalModelRequestFields": {"top_k": 3}} if overrides else {}),
+            "toolConfig": {
+                "tools": [
+                    {
+                        "toolSpec": {
+                            "name": "inspect",
+                            "description": "inspect",
+                            "inputSchema": {"json": {**schema, "required": []}},
+                        }
+                    },
+                    {"cachePoint": {"type": "default"}},
+                ]
+            },
+            "extension": {"fake_stream": "user data"},
+        }
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == expected
+        return httpx.Response(
+            200,
+            json=(
+                {
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+                if route == "invoke"
+                else {
+                    "output": {"message": {"role": "assistant", "content": [{"text": "hello"}]}},
+                    "stopReason": "end_turn",
+                    "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+                }
+            ),
+        )
+
+    transport: Final = httpx.MockTransport(respond)
+    client: Final = (
+        AsyncHTTPHandler(transport=transport) if is_async else HTTPHandler(client=httpx.Client(transport=transport))
+    )
+    try:
+        result: Final = BaseLLMHTTPHandler().completion(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://bedrock-runtime.us-east-1.amazonaws.com/model/test/invoke",
+            custom_llm_provider="bedrock",
+            model_response=ModelResponse(),
+            encoding=litellm.encoding,
+            logging_obj=_parameter_filter_logging(),
+            timeout=5,
+            acompletion=is_async,
+            api_key="synthetic-bearer",
+            client=client,
+            provider_config=litellm.AmazonAnthropicClaudeConfig()
+            if route == "invoke"
+            else litellm.AmazonConverseConfig(),
+            optional_params={
+                **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                "fake_stream": False,
+                **({"max_tokens": 10} if route == "invoke" else {"maxTokens": 10}),
+                "tools": [{"name": "inspect", "input_schema": schema}] if route == "invoke" else [tool],
+                "cache_control_injection_points": [{"location": "tool_config"}],
+                "extra_body": {
+                    **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                    "extension": {"fake_stream": "user data"},
+                    **(
+                        {
+                            "inferenceConfig": {"maxTokens": 12, **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True)},
+                            "additionalModelRequestFields": {
+                                "top_k": 3,
+                                **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                            },
+                        }
+                        if route == "converse" and overrides
+                        else {}
+                    ),
+                },
+            },
+            litellm_params={"aws_region_name": "us-east-1"},
+        )
+        response: Final = await result if inspect.isawaitable(result) else result
+        assert response.choices[0].message.content == "hello"
+    finally:
+        if isinstance(client, AsyncHTTPHandler):
+            await client.close()
+        else:
+            client.close()
+
+
+@pytest.mark.parametrize("is_async", (False, True))
+async def test_shared_embedding_filters_reserved_overrides(is_async: bool) -> None:
+    from litellm.litellm_core_utils.internal_params import INTERNAL_REQUEST_PARAMS
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "model": "voyage-4",
+            "input": ["hi"],
+            "output_dimension": 256,
+            "encoding_format": "float",
+            "extension": {"fake_stream": "user data"},
+        }
+        return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2], "index": 0}], "usage": {"total_tokens": 1}})
+
+    transport: Final = httpx.MockTransport(respond)
+    client: Final = (
+        AsyncHTTPHandler(transport=transport) if is_async else HTTPHandler(client=httpx.Client(transport=transport))
+    )
+    try:
+        result: Final = BaseLLMHTTPHandler().embedding(
+            model="voyage-4",
+            input=["hi"],
+            custom_llm_provider="voyage",
+            timeout=5,
+            logging_obj=_parameter_filter_logging(),
+            api_base="https://example.test",
+            model_response=litellm.EmbeddingResponse(),
+            api_key="synthetic-key",
+            client=client,
+            aembedding=is_async,
+            litellm_params={},
+            optional_params={
+                **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                "output_dimension": 256,
+                "encoding_format": "float",
+                "extra_body": {
+                    **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                    "extension": {"fake_stream": "user data"},
+                },
+            },
+        )
+        response: Final = await result if inspect.isawaitable(result) else result
+        assert response.data[0]["embedding"] == [0.1, 0.2]
+    finally:
+        if isinstance(client, AsyncHTTPHandler):
+            await client.close()
+        else:
+            client.close()
+
+
+@pytest.mark.parametrize("is_async", (False, True))
+async def test_fake_stream_control_is_consumed_before_provider_filtering(is_async: bool) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "hello"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    transport: Final = httpx.MockTransport(respond)
+    client: Final = (
+        AsyncHTTPHandler(transport=transport) if is_async else HTTPHandler(client=httpx.Client(transport=transport))
+    )
+    try:
+        result: Final = BaseLLMHTTPHandler().completion(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test",
+            api_key="synthetic-key",
+            custom_llm_provider="anthropic",
+            model_response=ModelResponse(),
+            encoding=litellm.encoding,
+            timeout=5,
+            logging_obj=_parameter_filter_logging(),
+            acompletion=is_async,
+            litellm_params={},
+            optional_params={"fake_stream": True, "max_tokens": 10},
+            stream=True,
+            client=client,
+        )
+        stream: Final = await result if inspect.isawaitable(result) else result
+        chunks: Final = [chunk async for chunk in stream] if is_async else list(stream)
+        assert "".join(chunk.choices[0].delta.content or "" for chunk in chunks if chunk.choices) == "hello"
+    finally:
+        if isinstance(client, AsyncHTTPHandler):
+            await client.close()
+        else:
+            client.close()

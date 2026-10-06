@@ -451,3 +451,57 @@ class TestBaseLLMAIOHTTPHandler:
         # Should use transport, not connector
         mock_transport._get_valid_client_session.assert_called_once()
         assert result is mock_session_from_transport
+
+
+def test_aiohttp_sync_chat_filters_reserved_overrides() -> None:
+    from typing import Final
+    from urllib.parse import parse_qs
+    import httpx
+    from litellm.litellm_core_utils.internal_params import INTERNAL_REQUEST_PARAMS
+    from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        expected: Final = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "extension": {"fake_stream": "user data"},
+        }
+        assert parse_qs(request.content) == parse_qs(
+            httpx.Request("POST", "https://example.test", data=expected).read()
+        )
+        return httpx.Response(
+            200,
+            json={
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "hello"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        response: Final = BaseLLMAIOHTTPHandler().completion(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test",
+            api_key="synthetic-key",
+            custom_llm_provider="anthropic",
+            model_response=litellm.ModelResponse(),
+            encoding=litellm.encoding,
+            logging_obj=Mock(model_call_details={}),
+            timeout=5,
+            acompletion=False,
+            litellm_params={},
+            optional_params={
+                **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                "fake_stream": False,
+                "max_tokens": 10,
+                "extra_body": {
+                    **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                    "extension": {"fake_stream": "user data"},
+                },
+            },
+            client=HTTPHandler(client=transport),
+        )
+    assert response.choices[0].message.content == "hello"

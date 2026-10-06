@@ -27,6 +27,7 @@ from pydantic import ConfigDict, TypeAdapter, ValidationError
 import litellm
 from litellm import verbose_logger
 from litellm.litellm_core_utils.aws_partition import get_aws_dns_suffix
+from litellm.litellm_core_utils.internal_params import filter_provider_body
 from litellm.llms.base_llm.anthropic_messages.transformation import (
     BaseAnthropicMessagesConfig,
 )
@@ -76,6 +77,23 @@ def _synthesize_error_response(
         else tuple((key, value) for key, value in headers.items() if isinstance(value, (str, bytes)))
     )
     return error_request, httpx.Response(status_code=status_code, headers=safe_headers, request=error_request)
+
+
+_BEDROCK_PARAMETER_MAPPING: Final = TypeAdapter(Mapping[str, object])
+_BEDROCK_CHAT_PARAMETER_CONTAINERS: Final = frozenset(
+    ("textGenerationConfig", "inferenceConfig", "additionalModelRequestFields")
+)
+
+
+def filter_bedrock_chat_request(request: Mapping[str, object]) -> Mapping[str, object]:
+    return filter_provider_body(
+        {
+            key: filter_provider_body(_BEDROCK_PARAMETER_MAPPING.validate_python(value))
+            if key in _BEDROCK_CHAT_PARAMETER_CONTAINERS and isinstance(value, Mapping)
+            else value
+            for key, value in request.items()
+        }
+    )
 
 
 class BedrockError(BaseLLMException):

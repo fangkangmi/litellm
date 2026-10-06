@@ -320,6 +320,9 @@ class LiteLLMOptions:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CallState:
+    skip_mcp_handler: bool | None = None
+    private_skip_mcp_handler: bool | None = field(default=None, metadata=wire("_skip_mcp_handler"))
+    mcp_handler_context: Mapping[str, object] | None = None
     litellm_call_id: str | None = None
     completion_call_id: str | None = None
     model_alias_map: Mapping[str, str] | None = None

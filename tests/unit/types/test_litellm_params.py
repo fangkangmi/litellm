@@ -227,6 +227,9 @@ AGENTIC_LOOP_STATE_NAMES: Final = (
 )
 
 INTERNAL_STATE_NAMES: Final = (
+    "skip_mcp_handler",
+    "_skip_mcp_handler",
+    "mcp_handler_context",
     "litellm_call_id",
     "completion_call_id",
     "model_alias_map",

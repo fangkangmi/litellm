@@ -567,3 +567,38 @@ class TestProviderResponseHeadersInHiddenParams:
 
         assert get_provider_response_headers_from_hidden_params(sibling) is None
         assert "additional_headers" not in sibling._hidden_params
+
+
+@pytest.mark.parametrize("additional", (None, frozenset(("custom_internal",))))
+def test_fallback_filter_preserves_credentials_and_non_mcp_controls(additional: frozenset[str] | None) -> None:
+    from litellm.litellm_core_utils.core_helpers import filter_internal_params
+    from litellm.litellm_core_utils.internal_params import MCP_INTERNAL_PARAMS
+
+    retained: Final = {
+        "api_key": "synthetic-key",
+        "num_retries": 2,
+        "fake_stream": True,
+        "stream_chunk_size": 8,
+        "cache_control_injection_points": [],
+    }
+    original: Final = {**retained, **dict.fromkeys(MCP_INTERNAL_PARAMS, True), "custom_internal": "value"}
+    assert filter_internal_params(original, None if additional is None else set(additional)) == (
+        retained if additional else {**retained, "custom_internal": "value"}
+    )
+    assert original == {**retained, **dict.fromkeys(MCP_INTERNAL_PARAMS, True), "custom_internal": "value"}
+
+
+def test_provider_filters_preserve_cache_consumer_and_nested_user_content() -> None:
+    from types import MappingProxyType
+    from litellm.litellm_core_utils.internal_params import (
+        INTERNAL_REQUEST_PARAMS,
+        filter_chat_params,
+        filter_provider_body,
+    )
+
+    nested: Final = {"properties": {key: {"type": "string"} for key in INTERNAL_REQUEST_PARAMS}}
+    parameters: Final = MappingProxyType({"extension": nested, **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True)})
+    assert filter_chat_params(parameters) == {"extension": nested, "cache_control_injection_points": True}
+    assert filter_provider_body(parameters) == {"extension": nested}
+    assert filter_provider_body(parameters)["extension"] is nested
+    assert parameters == {"extension": nested, **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True)}

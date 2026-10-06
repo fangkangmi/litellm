@@ -8,12 +8,110 @@ import httpx
 import pytest
 
 import litellm
+from litellm.litellm_core_utils.internal_params import INTERNAL_REQUEST_PARAMS
 from litellm.llms.bedrock.chat.invoke_transformations.base_invoke_transformation import (
     AmazonInvokeConfig,
 )
 from litellm.llms.bedrock.common_utils import BedrockError
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from tests._support.stream_chunk_size import DEFAULT_CHUNKING_REQUESTS, ROUTER_CHUNK_SIZE_CASES, keys_at_every_depth
+
+
+def test_mistral_completion_keeps_mcp_state_out_of_signed_body() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"prompt": "<s>[INST] hi [/INST]\n", "max_tokens": 10}
+        assert request.headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
+        return httpx.Response(200, json={"outputs": [{"text": "hello", "stop_reason": "stop"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        result: Final = litellm.completion(
+            model="bedrock/invoke/mistral.mistral-7b-instruct-v0:2",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=10,
+            skip_mcp_handler=True,
+            _skip_mcp_handler=True,
+            mcp_handler_context={"request_id": "internal"},
+            client=HTTPHandler(client=transport),
+            aws_access_key_id="fake",
+            aws_secret_access_key="fake",
+            aws_region_name="us-east-1",
+        )
+    assert result.choices[0].message.content == "hello"
+
+
+def test_titan_transform_filters_internal_inference_parameters() -> None:
+    parameters: Final = {
+        "maxTokenCount": 10,
+        **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+        "cache_control_injection_points": [],
+    }
+    result: Final = AmazonInvokeConfig().transform_request(
+        model="amazon.titan-text-express-v1",
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params=parameters,
+        litellm_params={},
+        headers={},
+    )
+    assert result == {"inputText": "\n\nUser: hi\n\nBot: ", "textGenerationConfig": {"maxTokenCount": 10}}
+    assert parameters == {
+        "maxTokenCount": 10,
+        **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+        "cache_control_injection_points": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "model",
+    ("anthropic.claude-v2:1", "us.amazon.nova-2-lite-v1:0", "twelvelabs.pegasus-1-2-v1:0", "openai.gpt-oss-120b-1:0"),
+)
+def test_delegated_invoke_transforms_filter_internal_parameters(model: str) -> None:
+    config: Final = AmazonInvokeConfig()
+    clean: Final = config.transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params={"max_tokens": 10},
+        litellm_params={},
+        headers={},
+    )
+    result: Final = config.transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params={
+            "max_tokens": 10,
+            **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+            "cache_control_injection_points": [],
+        },
+        litellm_params={},
+        headers={},
+    )
+    assert result == clean
+
+
+def test_titan_extra_body_filters_only_the_inference_container() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "inputText": "\n\nUser: hi\n\nBot: ",
+            "textGenerationConfig": {"maxTokenCount": 12},
+            "extension": {"fake_stream": "user data"},
+        }
+        return httpx.Response(
+            200, json={"results": [{"outputText": "hello", "tokenCount": 1}], "inputTextTokenCount": 1}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        result: Final = litellm.completion(
+            model="bedrock/invoke/amazon.titan-text-express-v1",
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={
+                **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+                "textGenerationConfig": {"maxTokenCount": 12, **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True)},
+                "extension": {"fake_stream": "user data"},
+            },
+            client=HTTPHandler(client=transport),
+            api_key="synthetic-bearer",
+            aws_region_name="us-east-1",
+        )
+    assert result.choices[0].message.content == "hello"
 
 
 @pytest.mark.parametrize(
@@ -398,3 +496,36 @@ def test_router_deployment_with_a_non_numeric_stream_chunk_size_gets_a_400_befor
 
     assert exc_info.value.status_code == 400
     send.assert_not_called()
+
+
+def test_delegated_nova_keeps_inline_cache_and_ignores_tool_cache_injection() -> None:
+    model: Final = "us.amazon.nova-2-lite-v1:0"
+    tools: Final = [
+        {"type": "function", "function": {"name": "inspect", "parameters": {"type": "object", "properties": {}}}}
+    ]
+    messages: Final = [
+        {"role": "system", "content": [{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": "hi"},
+    ]
+    expected: Final = litellm.AmazonInvokeNovaConfig().transform_request(
+        model=model,
+        messages=messages,
+        optional_params={"tools": tools, "maxTokens": 10},
+        litellm_params={},
+        headers={},
+    )
+    result: Final = AmazonInvokeConfig().transform_request(
+        model=model,
+        messages=messages,
+        optional_params={
+            **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
+            "tools": tools,
+            "maxTokens": 10,
+            "cache_control_injection_points": [{"location": "tool_config"}],
+        },
+        litellm_params={},
+        headers={},
+    )
+    assert result == expected
+    assert result["system"] == [{"text": "system", "cachePoint": {"type": "default"}}]
+    assert len(result["toolConfig"]["tools"]) == len(tools)
