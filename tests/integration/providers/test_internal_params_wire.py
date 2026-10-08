@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from integration._support.sigv4 import encoded_path, signature
 from integration._support.upstream import INTERNAL_FIELDS
 from integration._support.wire import Reply, Request, wire_server
 
@@ -316,60 +317,6 @@ async def test_internal_params_never_reach_provider_body(
 
 
 @pytest.mark.parametrize("asynchronous", (False, True))
-@pytest.mark.parametrize("source", ("kwargs", "extra_body", "allowed_openai_params"))
-async def test_mistral_invoke_filters_internal_fields_before_signing(
-    provider_wire_environment: None,
-    asynchronous: bool,
-    source: str,
-) -> None:
-    from integration._support.sigv4 import encoded_path, signature
-    from litellm.litellm_core_utils.internal_params import INTERNAL_REQUEST_PARAMS
-
-    def respond(request: Request) -> Reply:
-        assert json.loads(request.body) == {"prompt": "<s>[INST] hi [/INST]\n", "max_tokens": 10}
-        credential, signed, actual = request.headers["authorization"].removeprefix("AWS4-HMAC-SHA256 ").split(", ")
-        scope: Final = credential.split("/", 1)[1]
-        expected: Final = signature(
-            "POST",
-            encoded_path(request.target),
-            request.headers,
-            signed.removeprefix("SignedHeaders="),
-            request.body,
-            "fake",
-            scope,
-        )[1]
-        assert actual == f"Signature={expected}"
-        return Reply(body=json.dumps({"outputs": [{"text": "hello", "stop_reason": "stop"}]}).encode())
-
-    controls: Final = {
-        **dict.fromkeys(INTERNAL_REQUEST_PARAMS, True),
-        "fake_stream": False,
-        "stream_chunk_size": 16,
-        "cache_control_injection_points": [],
-    }
-    with wire_server(respond) as wire:
-        parameters: Final = {
-            "model": "bedrock/invoke/mistral.mistral-7b-instruct-v0:2",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 10,
-            "aws_access_key_id": "fake",
-            "aws_secret_access_key": "fake",
-            "aws_region_name": "us-east-1",
-            "aws_bedrock_runtime_endpoint": wire.url,
-            "num_retries": 0,
-            **({"extra_body": controls} if source == "extra_body" else controls),
-            **({"allowed_openai_params": list(INTERNAL_REQUEST_PARAMS)} if source == "allowed_openai_params" else {}),
-        }
-        result: Final = (
-            await litellm.acompletion(**parameters)
-            if asynchronous
-            else await asyncio.to_thread(litellm.completion, **parameters)
-        )
-        assert result.choices[0].message.content == "hello"
-        assert len(wire.drain()) == 1
-
-
-@pytest.mark.parametrize("asynchronous", (False, True))
 @pytest.mark.parametrize("encoding_format,embedding_type", (("float", "float"), ("base64", "binary")))
 async def test_titan_embedding_cache_controls_never_reach_wire(
     provider_wire_environment: None,
@@ -379,6 +326,23 @@ async def test_titan_embedding_cache_controls_never_reach_wire(
 ) -> None:
     def respond(request: Request) -> Reply:
         assert json.loads(request.body) == {"inputText": "hi", "dimensions": 256, "embeddingTypes": [embedding_type]}
+        authorization: Final = request.headers["authorization"]
+        assert authorization.startswith("AWS4-HMAC-SHA256 ")
+        fields: Final = dict(
+            part.split("=", 1) for part in authorization.removeprefix("AWS4-HMAC-SHA256 ").split(", ")
+        )
+        access_key, scope = fields["Credential"].split("/", 1)
+        assert access_key == "synthetic-access"
+        expected: Final = signature(
+            "POST",
+            encoded_path(request.target),
+            request.headers,
+            fields["SignedHeaders"],
+            request.body,
+            "synthetic-secret",
+            scope,
+        )
+        assert fields["Signature"] == expected[1]
         return Reply(body=json.dumps({"embedding": [0.1, 0.2], "inputTextTokenCount": 1}).encode())
 
     with wire_server(respond) as wire:
@@ -388,7 +352,8 @@ async def test_titan_embedding_cache_controls_never_reach_wire(
             "dimensions": 256,
             "encoding_format": encoding_format,
             "cache_control_injection_points": [{"location": "message", "index": -1}],
-            "api_key": "synthetic-bearer",
+            "aws_access_key_id": "synthetic-access",
+            "aws_secret_access_key": "synthetic-secret",
             "aws_region_name": "us-east-1",
             "api_base": wire.url,
         }

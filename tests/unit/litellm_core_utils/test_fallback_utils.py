@@ -167,34 +167,3 @@ def test_process_response_headers_ignores_preserve_flag_for_httpx_headers():
     result = process_response_headers(raw, preserve_litellm_internal_headers=True)
     assert "x-litellm-attempted-fallbacks" not in result
     assert result["llm_provider-x-litellm-attempted-fallbacks"] == "1"
-
-
-@pytest.mark.asyncio
-async def test_provider_fallback_retains_credentials_and_retry_controls() -> None:
-    from typing import Final
-    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == "Bearer synthetic-key"
-        if "primary" in str(request.url):
-            return httpx.Response(503, json={"error": "primary unavailable"})
-        return httpx.Response(200, json={"outputs": [{"text": "fallback response", "stop_reason": "stop"}]})
-
-    client: Final = AsyncHTTPHandler(transport=httpx.MockTransport(respond))
-    try:
-        response: Final = await async_completion_with_fallbacks(
-            model="bedrock/invoke/mistral.primary",
-            messages=[{"role": "user", "content": "hi"}],
-            client=client,
-            api_key="synthetic-key",
-            aws_region_name="us-east-1",
-            num_retries=0,
-            skip_mcp_handler=True,
-            _skip_mcp_handler=True,
-            mcp_handler_context={"id": "internal"},
-            kwargs={"fallbacks": ["bedrock/invoke/mistral.mistral-7b-instruct-v0:2"]},
-        )
-        assert response.choices[0].message.content == "fallback response"
-        assert response._hidden_params["additional_headers"]["x-litellm-attempted-fallbacks"] == 1
-    finally:
-        await client.close()

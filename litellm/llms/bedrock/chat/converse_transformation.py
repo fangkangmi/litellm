@@ -156,17 +156,6 @@ class AmazonConverseConfig(BaseConfig):
     topP: int | None
     topK: int | None
 
-    def transform_extra_body(
-        self,
-        extra_body: Mapping[str, object],
-        request: Mapping[str, object],
-        model: str,
-        litellm_params: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        from litellm.llms.bedrock.common_utils import filter_bedrock_chat_request
-
-        return filter_bedrock_chat_request(extra_body)
-
     def __init__(
         self,
         maxTokens: int | None = None,

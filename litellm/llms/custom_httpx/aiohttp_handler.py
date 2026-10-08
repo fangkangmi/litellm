@@ -10,7 +10,6 @@ import litellm
 import litellm.litellm_core_utils
 import litellm.types
 import litellm.types.utils
-from litellm.litellm_core_utils.internal_params import filter_chat_params, filter_provider_body
 from litellm.llms.base_llm.chat.transformation import BaseConfig
 from litellm.llms.base_llm.image_variations.transformation import (
     BaseImageVariationConfig,
@@ -320,8 +319,6 @@ class BaseLLMAIOHTTPHandler:
         )
         if provider_config is None:
             raise ValueError(f"Provider config not found for model: {model} and provider: {custom_llm_provider}")
-        use_fake_stream: Final = fake_stream or bool(optional_params.get("fake_stream", False))
-        extra_body: Final = optional_params.get("extra_body")
         # get config from model, custom llm provider
         headers = provider_config.validate_environment(
             api_key=api_key,
@@ -342,27 +339,12 @@ class BaseLLMAIOHTTPHandler:
             stream=stream,
         )
 
-        provider_params: Final = {key: value for key, value in optional_params.items() if key != "extra_body"}
-        transformed: Final = provider_config.transform_request(
+        data: Final = provider_config.transform_request(
             model=model,
             messages=messages,
-            optional_params=filter_chat_params(provider_params),
+            optional_params=optional_params,
             litellm_params=litellm_params,
             headers=headers,
-        )
-
-        data: Final = filter_provider_body(
-            {
-                **transformed,
-                **provider_config.transform_extra_body(
-                    extra_body=filter_provider_body(extra_body),
-                    request=transformed,
-                    model=model,
-                    litellm_params=litellm_params,
-                ),
-            }
-            if extra_body is not None
-            else transformed
         )
 
         ## LOGGING
@@ -396,7 +378,7 @@ class BaseLLMAIOHTTPHandler:
             )
 
         if stream is True:
-            if use_fake_stream is not True:
+            if fake_stream is not True:
                 data["stream"] = stream
             completion_stream, headers = self.make_sync_call(
                 provider_config=provider_config,
@@ -407,7 +389,7 @@ class BaseLLMAIOHTTPHandler:
                 messages=messages,
                 logging_obj=logging_obj,
                 timeout=timeout,
-                fake_stream=use_fake_stream,
+                fake_stream=fake_stream,
                 client=(client if client is not None and isinstance(client, HTTPHandler) else None),
                 litellm_params=litellm_params,
             )

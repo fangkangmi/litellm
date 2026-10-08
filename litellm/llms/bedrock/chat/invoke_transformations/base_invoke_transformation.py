@@ -11,7 +11,6 @@ import litellm
 from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.litellm_core_utils.get_litellm_params import stored_control_options
-from litellm.litellm_core_utils.internal_params import filter_chat_params, filter_provider_body
 from litellm.litellm_core_utils.logging_utils import track_llm_api_timing
 from litellm.litellm_core_utils.prompt_templates.factory import (
     cohere_message_pt,
@@ -173,17 +172,6 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
             if k not in inference_params:
                 inference_params[k] = v
 
-    def transform_extra_body(
-        self,
-        extra_body: Mapping[str, object],
-        request: Mapping[str, object],
-        model: str,
-        litellm_params: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        from litellm.llms.bedrock.common_utils import filter_bedrock_chat_request
-
-        return filter_bedrock_chat_request(extra_body)
-
     def transform_request(
         self,
         model: str,
@@ -193,10 +181,7 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
         headers: dict,
     ) -> dict:
         ## SETUP ##
-        stream: Final = optional_params.get("stream")
-        provider_params: Final = filter_chat_params(
-            {key: value for key, value in optional_params.items() if key != "stream"}
-        )
+        stream: Final = optional_params.pop("stream", None)
         custom_prompt_dict: Final[dict] = litellm_params.pop("custom_prompt_dict", None) or {}
         hf_model_name: Final = litellm_params.get("hf_model_name", None)
 
@@ -208,13 +193,8 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
             provider=provider,
             custom_prompt_dict=custom_prompt_dict,
         )
-        inference_params: Final = copy.deepcopy(
-            {
-                key: value
-                for key, value in filter_provider_body(provider_params).items()
-                if key not in self.aws_authentication_params
-            }
-        )
+        inference_params = copy.deepcopy(optional_params)
+        inference_params = {k: v for k, v in inference_params.items() if k not in self.aws_authentication_params}
         request_data: dict = {}
         if provider == "cohere":
             if model.startswith("cohere.command-r"):
@@ -233,24 +213,22 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
                     inference_params["stream"] = True  # cohere requires stream = True in inference params
                 request_data = {"prompt": prompt, **inference_params}
         elif provider == "anthropic":
-            return filter_provider_body(
-                litellm.AmazonAnthropicClaudeConfig().transform_request(
-                    model=model,
-                    messages=messages,
-                    optional_params=provider_params,
-                    litellm_params=litellm_params,
-                    headers=headers,
-                )
+            transformed_request: Final = litellm.AmazonAnthropicClaudeConfig().transform_request(
+                model=model,
+                messages=messages,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                headers=headers,
             )
+
+            return transformed_request
         elif provider == "nova":
-            return filter_provider_body(
-                litellm.AmazonInvokeNovaConfig().transform_request(
-                    model=model,
-                    messages=messages,
-                    optional_params=provider_params,
-                    litellm_params=litellm_params,
-                    headers=headers,
-                )
+            return litellm.AmazonInvokeNovaConfig().transform_request(
+                model=model,
+                messages=messages,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                headers=headers,
             )
         elif provider == "ai21":
             ## LOAD CONFIG
@@ -276,25 +254,21 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
             self._apply_config_to_params(config, inference_params)
             request_data = {"prompt": prompt, **inference_params}
         elif provider == "twelvelabs":
-            return filter_provider_body(
-                litellm.AmazonTwelveLabsPegasusConfig().transform_request(
-                    model=model,
-                    messages=messages,
-                    optional_params=provider_params,
-                    litellm_params=litellm_params,
-                    headers=headers,
-                )
+            return litellm.AmazonTwelveLabsPegasusConfig().transform_request(
+                model=model,
+                messages=messages,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                headers=headers,
             )
         elif provider == "openai":
             # OpenAI imported models use OpenAI Chat Completions format
-            return filter_provider_body(
-                litellm.AmazonBedrockOpenAIConfig().transform_request(
-                    model=model,
-                    messages=messages,
-                    optional_params=provider_params,
-                    litellm_params=litellm_params,
-                    headers=headers,
-                )
+            return litellm.AmazonBedrockOpenAIConfig().transform_request(
+                model=model,
+                messages=messages,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                headers=headers,
             )
         else:
             raise BedrockError(
@@ -302,7 +276,7 @@ class AmazonInvokeConfig(BaseConfig, BaseAWSLLM):
                 message=f"Bedrock Invoke HTTPX: Unknown provider={provider}, model={model}. Try calling via converse route - `bedrock/converse/<model>`.",
             )
 
-        return filter_provider_body(request_data)
+        return request_data
 
     def transform_response(
         self,

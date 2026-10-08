@@ -49,7 +49,7 @@ from litellm.litellm_core_utils.audio_utils.subtitle_utils import (
 )
 from litellm.litellm_core_utils.core_helpers import set_provider_response_headers_in_hidden_params
 from litellm.litellm_core_utils.get_litellm_params import AWS_CREDENTIAL_KWARGS_KEYS
-from litellm.litellm_core_utils.internal_params import filter_chat_params, filter_provider_body
+from litellm.litellm_core_utils.internal_params import filter_provider_body
 from litellm.litellm_core_utils.llm_request_utils import serialize_multipart_form_fields
 from litellm.litellm_core_utils.realtime_errors import (
     close_after_upstream_handshake_refusal,
@@ -739,14 +739,11 @@ class BaseLLMHTTPHandler:
         def sign_and_log(
             transformed: dict[str, object],  # mutable-ok: async_completion takes dict
         ) -> tuple[dict[str, object], dict[str, object], bytes | None]:  # mutable-ok: async_completion takes dict
-            data: Final = filter_provider_body(
+            data: Final = (
                 {
                     **transformed,
                     **provider_config.transform_extra_body(
-                        extra_body=filter_provider_body(extra_body),
-                        request=transformed,
-                        model=model,
-                        litellm_params=litellm_params,
+                        extra_body=extra_body, request=transformed, model=model, litellm_params=litellm_params
                     ),
                 }
                 if extra_body is not None
@@ -838,7 +835,7 @@ class BaseLLMHTTPHandler:
                     await provider_config.async_transform_request(
                         model=model,
                         messages=messages,
-                        optional_params=filter_chat_params(optional_params),
+                        optional_params=optional_params,
                         litellm_params=litellm_params,
                         headers=request_headers,
                     ),
@@ -856,7 +853,7 @@ class BaseLLMHTTPHandler:
             provider_config.transform_request(
                 model=model,
                 messages=messages,
-                optional_params=filter_chat_params(optional_params),
+                optional_params=optional_params,
                 litellm_params=litellm_params,
                 headers=request_headers,
             )

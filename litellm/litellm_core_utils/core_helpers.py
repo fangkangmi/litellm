@@ -11,7 +11,6 @@ import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from litellm._logging import verbose_logger
-from litellm.litellm_core_utils.internal_params import MCP_INTERNAL_PARAMS
 from litellm.litellm_core_utils.llm_response_utils.get_headers import get_provider_request_id
 from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
 
@@ -700,7 +699,18 @@ def filter_internal_params(data: dict, additional_internal_params: set | None = 
     if not isinstance(data, dict):
         return data
 
-    internal_params: Final = MCP_INTERNAL_PARAMS | frozenset(additional_internal_params or ())
+    # Known internal parameters that should never be sent to provider APIs
+    internal_params: Final = {
+        "skip_mcp_handler",
+        "mcp_handler_context",
+        "_skip_mcp_handler",
+    }
+
+    # Add any additional internal params if provided
+    if additional_internal_params:
+        internal_params.update(additional_internal_params)
+
+    # Filter out internal parameters
     return {k: v for k, v in data.items() if k not in internal_params}
 
 
